@@ -7,11 +7,15 @@ from typing import Any
 
 import httpx
 from dateutil import parser as date_parser
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import StructuredTool
+from langchain_groq import ChatGroq
+from langgraph.types import interrupt
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from config import get_settings
-from db import insert_itinerary_item
+from db import insert_itinerary_item, update_audit_log_decision
+from risk import assess_itinerary_risk
 
 
 def _call_mcp(path: str, params: dict[str, Any]) -> str:
@@ -243,17 +247,124 @@ def _local_news(city: str) -> str:
     return _call_mcp("/news/local", {"city": city, "page_size": 8})
 
 
-def _propose_itinerary_item(
-    city: str, start_date: str, end_date: str, notes: str = ""
+def _build_llm() -> ChatGroq:
+    # Mirrors graph.py's _build_llm. Duplicated rather than imported to avoid
+    # a tools.py <-> graph.py import cycle (graph.py imports tools for the
+    # sub-agents' tool lists).
+    settings = get_settings()
+    settings.require_groq_key()
+    return ChatGroq(
+        model=settings.groq_model,
+        temperature=0.2,
+        groq_api_key=settings.groq_api_key,
+    )
+
+
+def _generate_context_note(
+    city: str, start_date: str, end_date: str, notes: str, risk: dict
 ) -> str:
-    # Phase 2 (human-in-the-loop) will intercept here with an approval gate
-    # (e.g. a LangGraph interrupt()) before the DB write, so the user can
-    # approve, edit, or reject the proposal. For now it writes straight
-    # through so the sub-agent and tool work end to end.
-    row_id = insert_itinerary_item(city, start_date, end_date, notes)
-    confirmation = f"Saved itinerary item #{row_id}: {city} from {start_date} to {end_date}."
-    if notes:
-        confirmation += f" Notes: {notes}"
+    """One cheap extra LLM call: a one-line heads-up for the human, not a score.
+
+    Scoped to this proposal's own fields, not the full conversation — the
+    tool only receives its declared args plus an injected RunnableConfig, not
+    the graph's message history. Note: since interrupt() re-runs everything
+    before it when the node resumes, this call (like assess_itinerary_risk)
+    fires again on resume and its second result is discarded — wasted but
+    harmless, since interrupt() only returns the resume value on that pass.
+    """
+    try:
+        llm = _build_llm()
+        prompt = (
+            "In one short sentence, note anything worth a human's attention "
+            "about this itinerary proposal, based only on the details given. "
+            "Do not state a risk level or score — that is tracked separately.\n\n"
+            f"City: {city}\nStart date: {start_date}\nEnd date: {end_date}\n"
+            f"Notes: {notes or '(none)'}\n"
+            f"Automated risk flags: {', '.join(risk['reasons']) or '(none)'}"
+        )
+        response = llm.invoke(prompt)
+        text = (
+            response.content
+            if isinstance(response.content, str)
+            else str(response.content)
+        )
+        return text.strip() or "No additional context."
+    except Exception as exc:
+        return f"Context note unavailable: {exc}"
+
+
+def _propose_itinerary_item(
+    city: str,
+    start_date: str,
+    end_date: str,
+    notes: str = "",
+    # NOTE: must be the bare `RunnableConfig` type — not `RunnableConfig | None`
+    # or `Optional[RunnableConfig]`. langchain_core's tool config-injection
+    # (_get_runnable_config_param in langchain_core/tools/base.py) resolves
+    # the annotation via get_type_hints() and injects only when the resolved
+    # type `is RunnableConfig` exactly; a union/Optional silently fails that
+    # identity check and the parameter is left at its Python default instead
+    # of the real invocation config, with no error — just a wrong/missing
+    # thread_id at runtime. Confirmed by direct reproduction.
+    config: RunnableConfig = None,
+) -> str:
+    thread_id = (config or {}).get("configurable", {}).get("thread_id", "unknown")
+
+    risk = assess_itinerary_risk(city, start_date, end_date)
+    context_note = _generate_context_note(city, start_date, end_date, notes, risk)
+
+    # Pauses graph execution here and surfaces this payload to the caller
+    # (see main.py's pending_approval handling). Resuming via
+    # Command(resume=...) re-enters this function from the top with the
+    # resume value returned here instead of raising again.
+    decision = interrupt(
+        {
+            "proposed_item": {
+                "city": city,
+                "start_date": start_date,
+                "end_date": end_date,
+                "notes": notes,
+            },
+            "risk": risk,
+            "context_note": context_note,
+        }
+    )
+
+    action = decision.get("decision") if isinstance(decision, dict) else None
+
+    if action == "approve":
+        final_city, final_start, final_end, final_notes = city, start_date, end_date, notes
+    elif action == "edit":
+        edited = decision.get("edited_item") or {}
+        final_city = _normalize_text(edited.get("city", city), "city")
+        final_start = _normalize_date(edited.get("start_date", start_date), "start_date")
+        final_end = _normalize_date(edited.get("end_date", end_date), "end_date")
+        final_notes = edited.get("notes", notes) or ""
+    else:
+        # Rejected, or any unrecognized decision — safest default is no write.
+        update_audit_log_decision(
+            thread_id=thread_id,
+            human_decision="rejected",
+            final_city=None,
+            final_start_date=None,
+            final_end_date=None,
+            final_notes=None,
+        )
+        return "The proposed itinerary item was declined and was not saved."
+
+    row_id = insert_itinerary_item(final_city, final_start, final_end, final_notes)
+    update_audit_log_decision(
+        thread_id=thread_id,
+        human_decision="approved" if action == "approve" else "edited",
+        final_city=final_city,
+        final_start_date=final_start,
+        final_end_date=final_end,
+        final_notes=final_notes,
+    )
+
+    confirmation = f"Saved itinerary item #{row_id}: {final_city} from {final_start} to {final_end}."
+    if final_notes:
+        confirmation += f" Notes: {final_notes}"
     return confirmation
 
 

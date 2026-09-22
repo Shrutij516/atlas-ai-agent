@@ -192,7 +192,7 @@
   </form>
 
   <script>
-    const API_URL = "http://localhost:8000/chat/stream";
+    const API_URL = "/chat/stream";
     const WELCOME =
       "Hi, I'm Atlas. I can check live weather, forecast your trip, and pull the latest news for any city. What would you like to know?";
 
@@ -202,6 +202,15 @@
     const messagesEl = document.getElementById("messages");
 
     let conversationHistory = [];
+    // Stable for this whole chat session (one page load = one conversation,
+    // matching conversationHistory's lifetime). Sent as conversation_id so
+    // the backend's LangGraph checkpointer thread_id stays the same across
+    // turns — required for an itinerary proposal's interrupt to still be
+    // resumable by a later /approve call in this same conversation.
+    let conversationId =
+      window.crypto && window.crypto.randomUUID
+        ? window.crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     let isBusy = false;
 
     appendAssistantMessage(WELCOME, { stream: false });
@@ -224,14 +233,27 @@
 
         statusIndicator.remove();
 
-        conversationHistory = result.history || conversationHistory;
-        await appendAssistantMessage(result.response, { stream: true });
+        if (result.pendingApproval) {
+          // No approve/edit/reject UI yet — this just avoids showing a
+          // misleading "no response" error when a proposal needs a human
+          // decision. Approving/rejecting currently requires calling
+          // POST /approve directly (see backend docs).
+          const { proposed_item: item, risk, context_note: note } =
+            result.pendingApproval;
+          appendAssistantMessage(
+            `I'd like to add ${item.city} (${item.start_date} to ${item.end_date}) to your itinerary, but it needs approval before saving (risk: ${risk.level}). ${note}\n\nThread: ${result.pendingApproval.thread_id}`,
+            { stream: false }
+          );
+        } else {
+          conversationHistory = result.history || conversationHistory;
+          await appendAssistantMessage(result.response, { stream: true });
+        }
       } catch (err) {
         statusIndicator.remove();
         const errorText =
           err instanceof Error && err.message
             ? err.message
-            : "Couldn't reach the backend. Is it running at http://localhost:8000?";
+            : "Couldn't reach the server. Make sure all services are running.";
         appendAssistantMessage(errorText, { stream: false, isError: true });
       } finally {
         setBusy(false);
@@ -301,7 +323,7 @@
       const response = await fetch(API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, history }),
+        body: JSON.stringify({ message, history, conversation_id: conversationId }),
       });
 
       if (!response.ok) {
@@ -352,6 +374,8 @@
             onStatus(data.message);
           } else if (eventType === "done") {
             result = data;
+          } else if (eventType === "pending_approval") {
+            result = { pendingApproval: data };
           } else if (eventType === "error") {
             throw new Error(data.detail || "Something went wrong.");
           }

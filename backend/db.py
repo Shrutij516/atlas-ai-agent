@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
-# Phase 2 (human-in-the-loop) will also use this database for an audit log
-# of proposals and approval decisions, so keep this module generic — a
-# connection helper plus table-specific functions, not itinerary-only.
+# This database also backs phase 2's human-in-the-loop audit log, so this
+# module stays generic — a connection helper plus table-specific functions,
+# not itinerary-only.
 DB_PATH = Path(__file__).resolve().parent / "atlas.db"
 
 
@@ -37,6 +38,28 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL,
+                proposed_city TEXT NOT NULL,
+                proposed_start_date TEXT NOT NULL,
+                proposed_end_date TEXT NOT NULL,
+                proposed_notes TEXT,
+                risk_level TEXT NOT NULL,
+                risk_reasons TEXT NOT NULL,
+                context_note TEXT,
+                human_decision TEXT,
+                final_city TEXT,
+                final_start_date TEXT,
+                final_end_date TEXT,
+                final_notes TEXT,
+                proposed_at TEXT NOT NULL,
+                decided_at TEXT
+            )
+            """
+        )
 
 
 def insert_itinerary_item(
@@ -62,6 +85,91 @@ def list_itinerary_items() -> list[dict]:
             ORDER BY id
             """
         ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def insert_audit_log_proposal(
+    thread_id: str,
+    proposed_city: str,
+    proposed_start_date: str,
+    proposed_end_date: str,
+    proposed_notes: str,
+    risk_level: str,
+    risk_reasons: list[str],
+    context_note: str,
+) -> int:
+    """Record a proposal the moment it interrupts, before any human decision."""
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO audit_log (
+                thread_id, proposed_city, proposed_start_date, proposed_end_date,
+                proposed_notes, risk_level, risk_reasons, context_note, proposed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                thread_id,
+                proposed_city,
+                proposed_start_date,
+                proposed_end_date,
+                proposed_notes,
+                risk_level,
+                json.dumps(risk_reasons),
+                context_note,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        return cursor.lastrowid
+
+
+def update_audit_log_decision(
+    thread_id: str,
+    human_decision: str,
+    final_city: str | None,
+    final_start_date: str | None,
+    final_end_date: str | None,
+    final_notes: str | None,
+) -> None:
+    """Update the most recent undecided proposal for this thread.
+
+    Scoped by thread_id + "still pending" (decided_at IS NULL) rather than a
+    row id, since the caller (a resumed tool call) never saw the row that
+    insert_audit_log_proposal created for it — that insert happens in a
+    different process step (see main.py's interrupt handling).
+    """
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE audit_log
+            SET human_decision = ?,
+                final_city = ?,
+                final_start_date = ?,
+                final_end_date = ?,
+                final_notes = ?,
+                decided_at = ?
+            WHERE id = (
+                SELECT id FROM audit_log
+                WHERE thread_id = ? AND decided_at IS NULL
+                ORDER BY id DESC
+                LIMIT 1
+            )
+            """,
+            (
+                human_decision,
+                final_city,
+                final_start_date,
+                final_end_date,
+                final_notes,
+                datetime.now(timezone.utc).isoformat(),
+                thread_id,
+            ),
+        )
+
+
+def list_audit_log() -> list[dict[str, Any]]:
+    with get_connection() as conn:
+        rows = conn.execute("SELECT * FROM audit_log ORDER BY id").fetchall()
         return [dict(row) for row in rows]
 
 

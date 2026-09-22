@@ -4,7 +4,21 @@ python-dotenv>=1.0.0
 python-dateutil>=2.9.0
 httpx>=0.28.0
 pydantic>=2.0.0
-langchain>=0.3.0
-langchain-core>=0.3.0
-langchain-groq>=0.2.0
-langgraph>=0.2.0
+# Pinned exact (not >=): langgraph 1.x / langchain 1.x are out and pull in
+# breaking API changes (module paths, create_react_agent, interrupt/Command
+# semantics all shifted). Every behavior this backend relies on — the
+# multi-agent graph, interrupt()-based human-in-the-loop, ToolNode's
+# GraphBubbleUp passthrough — was verified against these 0.x versions
+# specifically. Bumping majors needs a deliberate re-verification pass, not
+# an incidental `pip install` picking up whatever's newest.
+langchain==0.3.30
+langchain-core==0.3.86
+langchain-groq==0.3.8
+langgraph==0.6.11
+langgraph-checkpoint==2.1.2
+langgraph-checkpoint-sqlite==2.0.11
+# Pinned: langgraph-checkpoint-sqlite's AsyncSqliteSaver.setup() calls
+# conn.is_alive(), a method aiosqlite.Connection only has while it still
+# subclasses threading.Thread. That was removed in aiosqlite>=0.21, so
+# staying on 0.20.x is required until langgraph-checkpoint-sqlite fixes it.
+aiosqlite==0.20.0

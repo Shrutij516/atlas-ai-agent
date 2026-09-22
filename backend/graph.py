@@ -1,18 +1,21 @@
 from __future__ import annotations
 
-from functools import lru_cache
+import asyncio
 from typing import Annotated, Literal, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage
+import aiosqlite
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableConfig
 from langchain_groq import ChatGroq
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel, Field
 
 from config import get_settings
+from db import DB_PATH
 from prompts import SYSTEM_PROMPT
 from tools import (
     current_weather,
@@ -96,9 +99,20 @@ ITINERARY_AGENT_PROMPT = (
     "notes. Confirm the city and dates are clear from the conversation "
     "before calling propose_itinerary_item; if a detail is genuinely "
     "ambiguous, make a reasonable assumption and state it plainly rather "
-    "than leaving the item unsaved. Report back what was proposed and "
-    "saved. Do not add travel advice or persona flourishes — another step "
-    "handles that."
+    "than leaving the item unsaved. "
+    "propose_itinerary_item goes through a human approval step before "
+    "anything is saved, and that human can change the city, dates, or notes "
+    "before approving. The tool's return string always states the city, "
+    "dates, and notes that were ACTUALLY saved — this may differ from what "
+    "the user originally asked for. There is only ONE outcome per proposal: "
+    "either exactly what the tool's return value says was saved (quote its "
+    "city and dates verbatim), or — if the tool says it was declined — "
+    "nothing was saved. Never mention the user's originally-requested city "
+    "or dates as if they were also saved, saved separately, or 'already "
+    "scheduled' alongside the tool's result. If the tool's saved city/dates "
+    "differ from the request, that difference means the original request "
+    "was NOT saved — only the tool's output was. Do not add travel advice "
+    "or persona flourishes — another step handles that."
 )
 
 
@@ -123,6 +137,23 @@ def _last_ai_text(messages: list[BaseMessage]) -> str:
             if text:
                 return text
     return ""
+
+
+def _last_tool_message_text(messages: list[BaseMessage], tool_name: str) -> str | None:
+    """Find the exact string a specific tool returned, bypassing any LLM paraphrase.
+
+    Used for propose_itinerary_item specifically: its return value states
+    which city/dates a human approver actually confirmed, which can differ
+    from the original request. The sub-agent's own follow-up AIMessage is an
+    LLM paraphrase of that ToolMessage and, empirically, isn't reliable
+    about not also mentioning the original (unsaved) request — even with
+    explicit prompt instructions not to. Relaying the tool's exact words
+    removes that failure mode entirely for this one fact.
+    """
+    for message in reversed(messages):
+        if isinstance(message, ToolMessage) and message.name == tool_name:
+            return _extract_text(message) or None
+    return None
 
 
 def _build_llm() -> ChatGroq:
@@ -151,8 +182,37 @@ def _build_sub_agent(tools: list, persona_prompt: str):
     return create_react_agent(model_with_tools, tools, prompt=prompt)
 
 
-@lru_cache
-def get_graph():
+_graph_lock = asyncio.Lock()
+_compiled_graph = None
+
+
+async def get_graph():
+    """Build (once) and return the compiled graph, with an async checkpointer.
+
+    Async, not @lru_cache like the rest of this module's builders: opening
+    the checkpointer needs an awaited aiosqlite connection, so this uses a
+    double-checked-locking singleton instead. interrupt()/resume requires a
+    checkpointer, and AsyncSqliteSaver specifically — the sync SqliteSaver
+    raises NotImplementedError on aget_tuple/aput/alist, which is what this
+    graph's astream_events-based execution calls.
+    """
+    global _compiled_graph
+    if _compiled_graph is not None:
+        return _compiled_graph
+
+    async with _graph_lock:
+        if _compiled_graph is not None:
+            return _compiled_graph
+
+        conn = await aiosqlite.connect(DB_PATH)
+        checkpointer = AsyncSqliteSaver(conn)
+        await checkpointer.setup()
+
+        _compiled_graph = _build_graph(checkpointer)
+        return _compiled_graph
+
+
+def _build_graph(checkpointer: AsyncSqliteSaver):
     supervisor_llm = _build_llm().with_structured_output(RouteDecision)
     supervisor_prompt = ChatPromptTemplate.from_messages(
         [
@@ -195,15 +255,30 @@ def get_graph():
 
     def itinerary_agent_node(state: AgentState, config: RunnableConfig) -> dict:
         result = itinerary_sub_agent.invoke({"messages": state["messages"]}, config)
-        text = _last_ai_text(result["messages"]) or "No itinerary changes were made."
+        # Prefer the tool's own exact confirmation over the sub-agent's
+        # paraphrase of it — see _last_tool_message_text's docstring.
+        text = (
+            _last_tool_message_text(result["messages"], "propose_itinerary_item")
+            or _last_ai_text(result["messages"])
+            or "No itinerary changes were made."
+        )
         return {"sub_results": {"itinerary": text}}
 
     def aggregator_node(state: AgentState, config: RunnableConfig) -> dict:
         sub_results = state.get("sub_results") or {}
         if sub_results:
-            findings = "Specialist findings to use in your reply (do not mention the specialists by name):\n\n" + "\n\n".join(
-                f"[{key}]\n{value}" for key, value in sub_results.items()
-            )
+            findings = (
+                "Specialist findings to use in your reply (do not mention the "
+                "specialists by name). Treat these as authoritative and more "
+                "current than anything said earlier in the conversation — the "
+                "itinerary finding in particular reflects what a human "
+                "approver actually confirmed, which can differ from the "
+                "user's original request (e.g. a different city or dates). "
+                "Always defer to the finding's stated facts over the user's "
+                "original message, and do not also mention the user's "
+                "original request as a separate or additional saved item — "
+                "there is only what the finding states.\n\n"
+            ) + "\n\n".join(f"[{key}]\n{value}" for key, value in sub_results.items())
         else:
             findings = "No specialist data was needed for this message."
 
@@ -247,4 +322,4 @@ def get_graph():
     builder.add_edge("itinerary_agent", "aggregator")
     builder.add_edge("aggregator", END)
 
-    return builder.compile(name=GRAPH_NAME)
+    return builder.compile(checkpointer=checkpointer, name=GRAPH_NAME)

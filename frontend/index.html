@@ -38,6 +38,13 @@
       border-bottom: 1px solid var(--border);
     }
 
+    .header-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+
     header h1 {
       font-size: 1rem;
       font-weight: 600;
@@ -48,6 +55,79 @@
       margin-top: 0.15rem;
       font-size: 0.8125rem;
       color: var(--text-muted);
+    }
+
+    .audit-toggle-btn {
+      flex-shrink: 0;
+      padding: 0.4rem 0.75rem;
+      background: #ffffff;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .audit-toggle-btn:hover { background: var(--bg); }
+
+    .audit-log-panel {
+      flex-shrink: 0;
+      max-height: 40vh;
+      overflow-y: auto;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 1.25rem;
+    }
+
+    /* See the approval card's identical note: without this, `display: flex`
+       below wins the specificity tie against the UA's `[hidden]` rule. */
+    .audit-log-panel[hidden] {
+      display: none;
+    }
+
+    .audit-log-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.75rem;
+    }
+
+    .audit-log-header h2 {
+      font-size: 0.9375rem;
+      font-weight: 600;
+    }
+
+    .audit-log-empty {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+      font-style: italic;
+    }
+
+    .audit-log-empty.error { color: #991b1b; font-style: normal; }
+
+    .audit-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8125rem;
+    }
+
+    .audit-table th,
+    .audit-table td {
+      text-align: left;
+      padding: 0.5rem 0.6rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    .audit-table th {
+      color: var(--atlas-label);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .audit-table td.audit-decision {
+      text-transform: capitalize;
     }
 
     #messages {
@@ -313,9 +393,28 @@
 </head>
 <body>
   <header>
-    <h1>Atlas</h1>
-    <p>Travel & lifestyle assistant — weather, news, and recommendations</p>
+    <div class="header-row">
+      <div>
+        <h1>Atlas</h1>
+        <p>Travel & lifestyle assistant — weather, news, and recommendations</p>
+      </div>
+      <button type="button" id="audit-log-toggle" class="audit-toggle-btn">
+        View audit log
+      </button>
+    </div>
   </header>
+
+  <section id="audit-log-panel" class="audit-log-panel" hidden>
+    <div class="audit-log-header">
+      <h2>Itinerary audit log</h2>
+      <button type="button" id="audit-log-refresh" class="audit-toggle-btn">
+        Refresh
+      </button>
+    </div>
+    <div id="audit-log-content">
+      <p class="audit-log-empty">Loading…</p>
+    </div>
+  </section>
 
   <div id="messages" aria-live="polite"></div>
 
@@ -333,6 +432,7 @@
   <script>
     const API_URL = "/chat/stream";
     const APPROVE_URL = "/approve";
+    const AUDIT_LOG_URL = "/audit-log";
     const WELCOME =
       "Hi, I'm Atlas. I can check live weather, forecast your trip, and pull the latest news for any city. What would you like to know?";
 
@@ -340,6 +440,10 @@
     const input = document.getElementById("user-input");
     const sendBtn = document.getElementById("send-btn");
     const messagesEl = document.getElementById("messages");
+    const auditToggleBtn = document.getElementById("audit-log-toggle");
+    const auditRefreshBtn = document.getElementById("audit-log-refresh");
+    const auditPanel = document.getElementById("audit-log-panel");
+    const auditContent = document.getElementById("audit-log-content");
 
     let conversationHistory = [];
     // Stable for this whole chat session (one page load = one conversation,
@@ -375,6 +479,7 @@
 
         if (result.pendingApproval) {
           appendApprovalCard(result.pendingApproval);
+          refreshAuditLogIfOpen();
         } else {
           conversationHistory = result.history || conversationHistory;
           await appendAssistantMessage(result.response, { stream: true });
@@ -567,6 +672,7 @@
             conversationHistory = result.history || conversationHistory;
             await appendAssistantMessage(result.response, { stream: true });
           }
+          refreshAuditLogIfOpen();
         } catch (err) {
           // A definite failure (network error, backend error event) — not a
           // double-submit race — so it's safe to let the user retry rather
@@ -743,6 +849,139 @@
 
     function sleep(ms) {
       return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    auditToggleBtn.addEventListener("click", async () => {
+      const willShow = auditPanel.hidden;
+      auditPanel.hidden = !willShow;
+      auditToggleBtn.textContent = willShow ? "Hide audit log" : "View audit log";
+      if (willShow) {
+        await loadAuditLog();
+      }
+    });
+
+    auditRefreshBtn.addEventListener("click", () => {
+      loadAuditLog();
+    });
+
+    function refreshAuditLogIfOpen() {
+      if (!auditPanel.hidden) {
+        loadAuditLog();
+      }
+    }
+
+    async function loadAuditLog() {
+      auditContent.innerHTML = "";
+      const loading = document.createElement("p");
+      loading.className = "audit-log-empty";
+      loading.textContent = "Loading…";
+      auditContent.appendChild(loading);
+
+      try {
+        const response = await fetch(AUDIT_LOG_URL);
+        if (!response.ok) {
+          throw new Error(`Request failed (${response.status})`);
+        }
+        const rows = await response.json();
+        renderAuditLog(rows);
+      } catch (err) {
+        auditContent.innerHTML = "";
+        const errorEl = document.createElement("p");
+        errorEl.className = "audit-log-empty error";
+        errorEl.textContent = "Couldn't load the audit log.";
+        auditContent.appendChild(errorEl);
+      }
+    }
+
+    function renderAuditLog(rows) {
+      auditContent.innerHTML = "";
+
+      if (!rows.length) {
+        const empty = document.createElement("p");
+        empty.className = "audit-log-empty";
+        empty.textContent = "No itinerary proposals yet.";
+        auditContent.appendChild(empty);
+        return;
+      }
+
+      const table = document.createElement("table");
+      table.className = "audit-table";
+
+      const thead = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      ["Proposed", "Risk", "Decision", "Final", "Proposed at", "Decided at"].forEach(
+        (label) => {
+          const th = document.createElement("th");
+          th.textContent = label;
+          headRow.appendChild(th);
+        }
+      );
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      const tbody = document.createElement("tbody");
+      rows.forEach((row) => {
+        tbody.appendChild(buildAuditRow(row));
+      });
+      table.appendChild(tbody);
+
+      auditContent.appendChild(table);
+    }
+
+    function buildAuditRow(row) {
+      const tr = document.createElement("tr");
+
+      const proposedTd = document.createElement("td");
+      proposedTd.textContent = formatItineraryCell(
+        row.proposed_city,
+        row.proposed_start_date,
+        row.proposed_end_date,
+        row.proposed_notes
+      );
+      tr.appendChild(proposedTd);
+
+      const riskTd = document.createElement("td");
+      const badge = document.createElement("span");
+      badge.className = `risk-badge risk-${row.risk_level}`;
+      badge.textContent = row.risk_level.toUpperCase();
+      riskTd.appendChild(badge);
+      tr.appendChild(riskTd);
+
+      const decisionTd = document.createElement("td");
+      decisionTd.className = "audit-decision";
+      decisionTd.textContent = row.human_decision || "pending";
+      tr.appendChild(decisionTd);
+
+      const finalTd = document.createElement("td");
+      finalTd.textContent = row.final_city
+        ? formatItineraryCell(
+            row.final_city,
+            row.final_start_date,
+            row.final_end_date,
+            row.final_notes
+          )
+        : "—";
+      tr.appendChild(finalTd);
+
+      const proposedAtTd = document.createElement("td");
+      proposedAtTd.textContent = formatTimestamp(row.proposed_at);
+      tr.appendChild(proposedAtTd);
+
+      const decidedAtTd = document.createElement("td");
+      decidedAtTd.textContent = row.decided_at ? formatTimestamp(row.decided_at) : "—";
+      tr.appendChild(decidedAtTd);
+
+      return tr;
+    }
+
+    function formatItineraryCell(city, startDate, endDate, notes) {
+      const base = `${city} (${startDate} to ${endDate})`;
+      return notes ? `${base} — ${notes}` : base;
+    }
+
+    function formatTimestamp(iso) {
+      const parsed = new Date(iso);
+      return Number.isNaN(parsed.getTime()) ? iso : parsed.toLocaleString();
     }
   </script>
 </body>

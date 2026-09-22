@@ -12,10 +12,16 @@ from langgraph.types import Command
 
 from agent import get_agent
 from config import get_settings
-from db import insert_audit_log_proposal
+from db import insert_audit_log_proposal, list_audit_log
 from graph import GRAPH_NAME
 from logging_config import get_logger, setup_logging
-from schemas import ApproveRequest, ChatMessage, ChatRequest, ChatResponse
+from schemas import (
+    ApproveRequest,
+    AuditLogEntry,
+    ChatMessage,
+    ChatRequest,
+    ChatResponse,
+)
 from status_messages import (
     DEFAULT_STATUS_MESSAGE,
     NODE_STATUS_MESSAGES,
@@ -410,6 +416,20 @@ async def _stream_approval_resume(request: ApproveRequest) -> AsyncIterator[str]
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/audit-log", response_model=list[AuditLogEntry])
+async def audit_log() -> list[AuditLogEntry]:
+    entries = []
+    for row in list_audit_log(limit=50):
+        try:
+            row["risk_reasons"] = (
+                json.loads(row["risk_reasons"]) if row["risk_reasons"] else []
+            )
+        except (TypeError, ValueError):
+            row["risk_reasons"] = []
+        entries.append(AuditLogEntry(**row))
+    return entries
 
 
 @app.post("/chat", response_model=ChatResponse)

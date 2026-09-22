@@ -167,9 +167,12 @@ def update_audit_log_decision(
         )
 
 
-def list_audit_log() -> list[dict[str, Any]]:
+def list_audit_log(limit: int = 50) -> list[dict[str, Any]]:
+    """Most recent proposals first, capped at `limit` rows."""
     with get_connection() as conn:
-        rows = conn.execute("SELECT * FROM audit_log ORDER BY id").fetchall()
+        rows = conn.execute(
+            "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
         return [dict(row) for row in rows]
 
 

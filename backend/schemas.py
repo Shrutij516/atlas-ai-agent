@@ -62,3 +62,22 @@ class ApproveRequest(BaseModel):
         default=None,
         description="Required when decision is 'edit'; the corrected item to save instead.",
     )
+
+
+class AuditLogEntry(BaseModel):
+    id: int
+    thread_id: str
+    proposed_city: str
+    proposed_start_date: str
+    proposed_end_date: str
+    proposed_notes: str | None = ""
+    risk_level: str
+    risk_reasons: list[str]
+    context_note: str | None = ""
+    human_decision: str | None = None
+    final_city: str | None = None
+    final_start_date: str | None = None
+    final_end_date: str | None = None
+    final_notes: str | None = None
+    proposed_at: str
+    decided_at: str | None = None

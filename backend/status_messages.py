@@ -11,6 +11,7 @@ NODE_STATUS_MESSAGES: dict[str, str] = {
     "supervisor": "Atlas is figuring out what you need...",
     "weather_agent": "Atlas is consulting the weather specialist...",
     "news_agent": "Atlas is consulting the news specialist...",
+    "itinerary_agent": "Atlas is planning your itinerary...",
     "aggregator": "Atlas is putting together your answer...",
 }
 

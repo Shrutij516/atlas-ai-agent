@@ -14,7 +14,13 @@ from pydantic import BaseModel, Field
 
 from config import get_settings
 from prompts import SYSTEM_PROMPT
-from tools import current_weather, local_news, news_headlines, weather_forecast
+from tools import (
+    current_weather,
+    local_news,
+    news_headlines,
+    propose_itinerary_item,
+    weather_forecast,
+)
 
 # Name given to the compiled graph so we can unambiguously pick its own
 # on_chain_end event out of the stream (see main.py). Sub-agents below are
@@ -25,18 +31,21 @@ GRAPH_NAME = "atlas_graph"
 
 WEATHER_TOOLS = [current_weather, weather_forecast]
 NEWS_TOOLS = [news_headlines, local_news]
+ITINERARY_TOOLS = [propose_itinerary_item]
 
 
 class RouteDecision(BaseModel):
-    route: list[Literal["weather", "news"]] = Field(
+    route: list[Literal["weather", "news", "itinerary"]] = Field(
         default_factory=list,
         description=(
             "Which specialist sub-agents are needed to answer the user's "
             "latest message. Include 'weather' for current conditions, "
             "forecasts, or packing/outdoor questions. Include 'news' for "
             "headlines, events, or what's happening in a place. Include "
-            "both if the message needs both. Leave empty for casual "
-            "conversation that needs neither."
+            "'itinerary' when the user wants to add, save, or plan a "
+            "specific trip item (a city with dates), not just ask about "
+            "weather or news. Include multiple when the message needs "
+            "them. Leave empty for casual conversation that needs neither."
         ),
     )
 
@@ -59,9 +68,12 @@ SUPERVISOR_PROMPT = (
     "Decide which specialist sub-agents must run to answer the user's latest "
     "message. Route to 'weather' for anything about current conditions, "
     "forecasts, packing, or outdoor plans. Route to 'news' for anything about "
-    "headlines, local events, or what's happening in a place. Route to both "
-    "when the message needs both. Route to neither for greetings or general "
-    "conversation that doesn't need live data."
+    "headlines, local events, or what's happening in a place. Route to "
+    "'itinerary' when the user wants to add, save, or plan a specific trip "
+    "item — a concrete city with start/end dates — not just ask about "
+    "weather or news in passing. Route to multiple sub-agents when the "
+    "message needs more than one. Route to none for greetings or general "
+    "conversation that doesn't need live data or a saved itinerary item."
 )
 
 WEATHER_AGENT_PROMPT = (
@@ -76,6 +88,17 @@ NEWS_AGENT_PROMPT = (
     "local events information the user needs and report the factual results "
     "(headlines, summaries, sources). Do not add travel advice or persona "
     "flourishes — another step handles that."
+)
+
+ITINERARY_AGENT_PROMPT = (
+    "You are Atlas's itinerary specialist. Help the user plan concrete "
+    "itinerary items — a city with a start and end date, plus optional "
+    "notes. Confirm the city and dates are clear from the conversation "
+    "before calling propose_itinerary_item; if a detail is genuinely "
+    "ambiguous, make a reasonable assumption and state it plainly rather "
+    "than leaving the item unsaved. Report back what was proposed and "
+    "saved. Do not add travel advice or persona flourishes — another step "
+    "handles that."
 )
 
 
@@ -141,6 +164,7 @@ def get_graph():
 
     weather_sub_agent = _build_sub_agent(WEATHER_TOOLS, WEATHER_AGENT_PROMPT)
     news_sub_agent = _build_sub_agent(NEWS_TOOLS, NEWS_AGENT_PROMPT)
+    itinerary_sub_agent = _build_sub_agent(ITINERARY_TOOLS, ITINERARY_AGENT_PROMPT)
 
     aggregator_llm = _build_llm()
     aggregator_prompt_template = ChatPromptTemplate.from_messages(
@@ -169,6 +193,11 @@ def get_graph():
         text = _last_ai_text(result["messages"]) or "No news information was returned."
         return {"sub_results": {"news": text}}
 
+    def itinerary_agent_node(state: AgentState, config: RunnableConfig) -> dict:
+        result = itinerary_sub_agent.invoke({"messages": state["messages"]}, config)
+        text = _last_ai_text(result["messages"]) or "No itinerary changes were made."
+        return {"sub_results": {"itinerary": text}}
+
     def aggregator_node(state: AgentState, config: RunnableConfig) -> dict:
         sub_results = state.get("sub_results") or {}
         if sub_results:
@@ -193,6 +222,8 @@ def get_graph():
             destinations.append("weather_agent")
         if "news" in route:
             destinations.append("news_agent")
+        if "itinerary" in route:
+            destinations.append("itinerary_agent")
         return destinations or ["aggregator"]
 
     builder = StateGraph(AgentState)
@@ -200,6 +231,7 @@ def get_graph():
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("weather_agent", weather_agent_node)
     builder.add_node("news_agent", news_agent_node)
+    builder.add_node("itinerary_agent", itinerary_agent_node)
     builder.add_node("aggregator", aggregator_node)
 
     builder.set_entry_point("supervisor")
@@ -207,11 +239,12 @@ def get_graph():
     builder.add_conditional_edges(
         "supervisor",
         route_from_supervisor,
-        ["weather_agent", "news_agent", "aggregator"],
+        ["weather_agent", "news_agent", "itinerary_agent", "aggregator"],
     )
 
     builder.add_edge("weather_agent", "aggregator")
     builder.add_edge("news_agent", "aggregator")
+    builder.add_edge("itinerary_agent", "aggregator")
     builder.add_edge("aggregator", END)
 
     return builder.compile(name=GRAPH_NAME)

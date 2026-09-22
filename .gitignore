@@ -19,6 +19,10 @@ build/
 # Node
 node_modules/
 
+# SQLite databases
+*.db
+*.db-journal
+
 # IDE / OS
 .idea/
 .vscode/

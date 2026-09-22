@@ -18,7 +18,7 @@ from services.errors import ServiceError
 async def lifespan(app: FastAPI):
     settings = get_settings()
     app.state.http_client = httpx.AsyncClient(
-        headers={"User-Agent": "inmarket-ai-builder-mcp-server/0.1.0"},
+        headers={"User-Agent": "atlas-ai-agent-mcp-server/0.1.0"},
         timeout=settings.request_timeout,
     )
     yield

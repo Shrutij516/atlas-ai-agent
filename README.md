@@ -179,7 +179,7 @@ POST /chat/stream                                    POST /approve
 ```bash
 # 1. Clone the repo
 git clone <your-repo-url>
-cd inmarket-ai-builder
+cd atlas-ai-agent
 
 # 2. Set up API keys (see sections below), then configure .env files
 cp mcp-server/.env.example mcp-server/.env
@@ -376,7 +376,7 @@ Try: *"What's the weather in San Francisco this week?"* — you should see a sta
 ## Project Structure
 
 ```
-inmarket-ai-builder/
+atlas-ai-agent/
 ├── README.md
 ├── .gitignore
 ├── mcp-server/

@@ -1,0 +1,26 @@
+.env
+.env.*
+!.env.example
+
+# SQLite runtime files — must never be baked into the image (see
+# Dockerfile's comment on atlas.db for why a fresh, empty DB per build is
+# the correct behavior here, and its limits).
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+
+node_modules/
+
+.git/
+.idea/
+.vscode/
+.DS_Store

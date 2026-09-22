@@ -121,6 +121,145 @@
       border-style: dashed;
     }
 
+    .bubble.approval-card {
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+      width: 100%;
+    }
+
+    .approval-title {
+      font-weight: 600;
+      font-size: 0.9375rem;
+    }
+
+    .approval-field {
+      font-size: 0.875rem;
+    }
+
+    .approval-field strong {
+      font-weight: 600;
+      margin-right: 0.25rem;
+    }
+
+    .approval-risk {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+
+    .risk-badge {
+      display: inline-block;
+      align-self: flex-start;
+      padding: 0.15rem 0.55rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .risk-badge.risk-low { background: #dcfce7; color: #166534; }
+    .risk-badge.risk-medium { background: #fef3c7; color: #92400e; }
+    .risk-badge.risk-high { background: #fee2e2; color: #991b1b; }
+
+    .risk-reasons {
+      list-style: disc;
+      padding-left: 1.25rem;
+      font-size: 0.8125rem;
+      color: var(--text-muted);
+    }
+
+    .approval-context {
+      font-size: 0.8125rem;
+      color: var(--text-muted);
+      font-style: italic;
+    }
+
+    .approval-actions,
+    .approval-edit-actions {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    /* [hidden] and .approval-actions/.approval-edit-form both have a single
+       class/attribute selector, so without this the cascade's source order
+       (this stylesheet loads after the UA stylesheet) lets `display: flex`
+       win over the browser's default `[hidden] { display: none }`. */
+    .approval-actions[hidden],
+    .approval-edit-form[hidden] {
+      display: none;
+    }
+
+    .approval-btn {
+      padding: 0.45rem 0.9rem;
+      border-radius: 0.5rem;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: opacity 0.15s, background 0.15s;
+    }
+
+    .approval-btn.approve { background: #16a34a; color: #ffffff; }
+    .approval-btn.approve:hover:not(:disabled) { background: #15803d; }
+
+    .approval-btn.reject { background: #ffffff; color: #991b1b; border-color: #fecaca; }
+    .approval-btn.reject:hover:not(:disabled) { background: #fef2f2; }
+
+    .approval-btn.edit,
+    .approval-btn.cancel { background: #ffffff; color: var(--text); border-color: var(--border); }
+    .approval-btn.edit:hover:not(:disabled),
+    .approval-btn.cancel:hover:not(:disabled) { background: var(--bg); }
+
+    .approval-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .approval-edit-form {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      padding-top: 0.25rem;
+      border-top: 1px solid var(--border);
+    }
+
+    .approval-edit-form label {
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+      font-size: 0.75rem;
+      color: var(--atlas-label);
+    }
+
+    .approval-edit-form input {
+      padding: 0.45rem 0.6rem;
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      background: var(--input-bg);
+      color: var(--text);
+      font-size: 0.875rem;
+      font-family: inherit;
+    }
+
+    .approval-edit-form input:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .approval-edit-error {
+      font-size: 0.8125rem;
+      color: #991b1b;
+    }
+
+    .approval-status {
+      font-size: 0.8125rem;
+      color: var(--text-muted);
+      font-style: italic;
+      min-height: 1em;
+    }
+
     .composer {
       flex-shrink: 0;
       display: flex;
@@ -193,6 +332,7 @@
 
   <script>
     const API_URL = "/chat/stream";
+    const APPROVE_URL = "/approve";
     const WELCOME =
       "Hi, I'm Atlas. I can check live weather, forecast your trip, and pull the latest news for any city. What would you like to know?";
 
@@ -234,16 +374,7 @@
         statusIndicator.remove();
 
         if (result.pendingApproval) {
-          // No approve/edit/reject UI yet — this just avoids showing a
-          // misleading "no response" error when a proposal needs a human
-          // decision. Approving/rejecting currently requires calling
-          // POST /approve directly (see backend docs).
-          const { proposed_item: item, risk, context_note: note } =
-            result.pendingApproval;
-          appendAssistantMessage(
-            `I'd like to add ${item.city} (${item.start_date} to ${item.end_date}) to your itinerary, but it needs approval before saving (risk: ${risk.level}). ${note}\n\nThread: ${result.pendingApproval.thread_id}`,
-            { stream: false }
-          );
+          appendApprovalCard(result.pendingApproval);
         } else {
           conversationHistory = result.history || conversationHistory;
           await appendAssistantMessage(result.response, { stream: true });
@@ -319,11 +450,202 @@
       };
     }
 
+    const APPROVAL_CARD_MARKUP = `
+      <div class="approval-title">Itinerary approval needed</div>
+      <div class="approval-field"><strong>City:</strong><span data-field="city"></span></div>
+      <div class="approval-field"><strong>Dates:</strong><span data-field="dates"></span></div>
+      <div class="approval-field"><strong>Notes:</strong><span data-field="notes"></span></div>
+      <div class="approval-risk">
+        <span class="risk-badge" data-field="risk-badge"></span>
+        <ul class="risk-reasons" data-field="risk-reasons"></ul>
+      </div>
+      <p class="approval-context" data-field="context-note"></p>
+      <div class="approval-actions" data-role="actions">
+        <button type="button" data-action="approve" class="approval-btn approve">Approve</button>
+        <button type="button" data-action="reject" class="approval-btn reject">Reject</button>
+        <button type="button" data-action="edit" class="approval-btn edit">Edit</button>
+      </div>
+      <div class="approval-edit-form" data-role="edit-form" hidden>
+        <label>City<input type="text" data-edit="city" /></label>
+        <label>Start date<input type="date" data-edit="start_date" /></label>
+        <label>End date<input type="date" data-edit="end_date" /></label>
+        <label>Notes<input type="text" data-edit="notes" /></label>
+        <div class="approval-edit-error" data-field="edit-error"></div>
+        <div class="approval-edit-actions">
+          <button type="button" data-action="confirm-edit" class="approval-btn approve">Confirm Edit</button>
+          <button type="button" data-action="cancel-edit" class="approval-btn cancel">Cancel</button>
+        </div>
+      </div>
+      <div class="approval-status" data-role="status"></div>
+    `;
+
+    function appendApprovalCard(pending) {
+      const { row, bubble } = createRow("assistant");
+      bubble.classList.add("approval-card");
+      bubble.innerHTML = APPROVAL_CARD_MARKUP;
+
+      const item = pending.proposed_item;
+      const risk = pending.risk;
+
+      // All dynamic values are set via textContent/.value, never innerHTML,
+      // since city/notes/context_note/risk reasons can contain LLM- or
+      // human-supplied text that shouldn't be interpreted as markup.
+      bubble.querySelector('[data-field="city"]').textContent = ` ${item.city}`;
+      bubble.querySelector('[data-field="dates"]').textContent =
+        ` ${item.start_date} to ${item.end_date}`;
+      bubble.querySelector('[data-field="notes"]').textContent =
+        ` ${item.notes || "(none)"}`;
+      bubble.querySelector('[data-field="context-note"]').textContent =
+        pending.context_note || "";
+
+      const badge = bubble.querySelector('[data-field="risk-badge"]');
+      badge.textContent = `${risk.level.toUpperCase()} RISK`;
+      badge.classList.add(`risk-${risk.level}`);
+
+      const reasonsEl = bubble.querySelector('[data-field="risk-reasons"]');
+      if (risk.reasons && risk.reasons.length) {
+        risk.reasons.forEach((reason) => {
+          const li = document.createElement("li");
+          li.textContent = reason;
+          reasonsEl.appendChild(li);
+        });
+      } else {
+        reasonsEl.hidden = true;
+      }
+
+      bubble.querySelector('[data-edit="city"]').value = item.city;
+      bubble.querySelector('[data-edit="start_date"]').value = item.start_date;
+      bubble.querySelector('[data-edit="end_date"]').value = item.end_date;
+      bubble.querySelector('[data-edit="notes"]').value = item.notes || "";
+
+      messagesEl.appendChild(row);
+      scrollToBottom();
+
+      wireApprovalCard(row, bubble, pending.thread_id);
+    }
+
+    function wireApprovalCard(row, bubble, threadId) {
+      let resolved = false;
+
+      const actionsEl = bubble.querySelector('[data-role="actions"]');
+      const editFormEl = bubble.querySelector('[data-role="edit-form"]');
+      const statusEl = bubble.querySelector('[data-role="status"]');
+      const editErrorEl = bubble.querySelector('[data-field="edit-error"]');
+
+      function setAllDisabled(disabled) {
+        bubble.querySelectorAll("button, input").forEach((el) => {
+          el.disabled = disabled;
+        });
+      }
+
+      function setStatus(message) {
+        statusEl.textContent = message || "";
+      }
+
+      async function handleDecision(decision, editedItem) {
+        // Checked and set synchronously, before any await, so a rapid
+        // double-click can't slip a second submit in while the first is
+        // still in flight — the `disabled` attribute (set in the same
+        // synchronous tick) additionally stops a disabled button from ever
+        // dispatching a second click event at all.
+        if (resolved) return;
+        resolved = true;
+        setAllDisabled(true);
+        setBusy(true);
+        setStatus("Atlas is thinking...");
+
+        try {
+          const result = await submitApproval(threadId, decision, editedItem, (message) => {
+            setStatus(message);
+          });
+
+          row.remove();
+
+          if (result.pendingApproval) {
+            appendApprovalCard(result.pendingApproval);
+          } else {
+            conversationHistory = result.history || conversationHistory;
+            await appendAssistantMessage(result.response, { stream: true });
+          }
+        } catch (err) {
+          // A definite failure (network error, backend error event) — not a
+          // double-submit race — so it's safe to let the user retry rather
+          // than leaving a permanently dead card.
+          resolved = false;
+          setAllDisabled(false);
+          setStatus("");
+          const errorText =
+            err instanceof Error && err.message
+              ? err.message
+              : "Something went wrong.";
+          appendAssistantMessage(errorText, { stream: false, isError: true });
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      actionsEl.addEventListener("click", (e) => {
+        const action = e.target.closest("button")?.dataset.action;
+        if (!action) return;
+
+        if (action === "approve") {
+          handleDecision("approve");
+        } else if (action === "reject") {
+          handleDecision("reject");
+        } else if (action === "edit") {
+          actionsEl.hidden = true;
+          editFormEl.hidden = false;
+        }
+      });
+
+      editFormEl.addEventListener("click", (e) => {
+        const action = e.target.closest("button")?.dataset.action;
+        if (!action) return;
+
+        if (action === "cancel-edit") {
+          editErrorEl.textContent = "";
+          editFormEl.hidden = true;
+          actionsEl.hidden = false;
+        } else if (action === "confirm-edit") {
+          const editedItem = {
+            city: editFormEl.querySelector('[data-edit="city"]').value.trim(),
+            start_date: editFormEl.querySelector('[data-edit="start_date"]').value,
+            end_date: editFormEl.querySelector('[data-edit="end_date"]').value,
+            notes: editFormEl.querySelector('[data-edit="notes"]').value.trim(),
+          };
+
+          if (!editedItem.city || !editedItem.start_date || !editedItem.end_date) {
+            editErrorEl.textContent = "City, start date, and end date are required.";
+            return;
+          }
+
+          editErrorEl.textContent = "";
+          handleDecision("edit", editedItem);
+        }
+      });
+    }
+
     async function streamChat(message, history, onStatus) {
-      const response = await fetch(API_URL, {
+      return streamSSE(
+        API_URL,
+        { message, history, conversation_id: conversationId },
+        onStatus
+      );
+    }
+
+    async function submitApproval(threadId, decision, editedItem, onStatus) {
+      const body = { thread_id: threadId, decision };
+      if (decision === "edit" && editedItem) {
+        body.edited_item = editedItem;
+      }
+      return streamSSE(APPROVE_URL, body, onStatus);
+    }
+
+    async function streamSSE(url, body, onStatus) {
+      const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, history, conversation_id: conversationId }),
+        body: JSON.stringify(body),
       });
 
       if (!response.ok) {
